@@ -68,26 +68,31 @@ error_log = []
 
 
 def normalize_size(size_str):
-    """
-    Converts Master Sheet sizes (2XL, 2XS) to Product Sheet format (XXL, XXS).
-    """
     if pd.isna(size_str): return ""
     s = str(size_str).strip().upper()
-
-    # MAPPING FIX
     if s == "2XL": return "XXL"
     if s == "2XS": return "XXS"
     if s == "3XL": return "XXXL"
-
     return s
 
 
-def get_session(timeslot_str):
+def extract_start_time(timeslot_str):
+    """Extracts the first 4-digit time (e.g., 0930) from string."""
     if pd.isna(timeslot_str) or str(timeslot_str).upper() == 'N/A': return None
+    # Find all 4-digit numbers, ignore 2026 (the year)
     all_numbers = re.findall(r'(\d{4})', str(timeslot_str))
-    times = [t for t in all_numbers if t != '2026']
-    if not times: return None
-    start_time = int(times[0])
+    times = [int(t) for t in all_numbers if t != '2026']
+
+    if times:
+        return times[0]  # Return the first found time (Start Time)
+    return None
+
+
+def get_session(timeslot_str):
+    """General session sorter (Morning/Afternoon/Night) for tabs"""
+    start_time = extract_start_time(timeslot_str)
+    if start_time is None: return None
+
     if 800 <= start_time < 1300:
         return "Morning"
     elif 1300 <= start_time < 1700:
@@ -125,11 +130,9 @@ for idx, row in df_master.iterrows():
     first, last = split_name(full_name)
     email = row['Email']
     category = str(row['Category']).strip()
-
-    # --- SIZE FIX APPLIED HERE ---
     shirt_size = normalize_size(row['Shirt Size'])
 
-    # Check Finalised Status (Case insensitive)
+    # Check Finalised
     is_finalised = str(row.get('Finalised', '')).strip().lower() == 'yes'
 
     for col in standard_cols:
@@ -142,30 +145,41 @@ for idx, row in df_master.iterrows():
         session = get_session(val)
 
         if day and session:
-            # Add to Tab (Keep all attempts in schedule tabs)
+            # 1. Add to Schedule Tabs (All entries)
             tab_name = f"{day} {session}"
             if tab_name in tabs_data:
                 tabs_data[tab_name].append(row)
 
-            # --- MAPPING LOGIC (Standard) ---
+            # 2. Determine Product Name
             item_name = None
 
             if col == 'Beginner Climb Time slot':
-                sess_num = "1"
-                if '1300' in val or '13:00' in val: sess_num = "2"
-                if '1600' in val or '16:00' in val: sess_num = "3"
-                item_name = f"Learn to Climb - Session {sess_num}"
+                # --- NEW LOGIC: LEARN TO CLIMB ---
+                start_time = extract_start_time(val)
+
+                if start_time:
+                    if start_time <= 1110:  # 0930 slot
+                        sess_num = "1"
+                    elif start_time <= 1300:  # 1115 slot
+                        sess_num = "2"
+                    elif start_time <= 1510:  # 1330 slot
+                        sess_num = "3"
+                    else:  # 1515+ slot
+                        sess_num = "4"
+
+                    item_name = f"Learn to Climb - Session {sess_num}"
+                else:
+                    item_name = "Learn to Climb - Session 1"  # Fallback
             else:
-                # Individual or Team
+                # --- STANDARD LOGIC: INDIVIDUAL / TEAM ---
                 prefix = "Team" if "Team" in category else "Individual"
                 day_str = day.replace("D", "Day ")
                 item_name = f"{prefix} - {day_str} {session}"
 
-            # Lookup
+            # 3. Lookup & Add to Summary (Finalised Only)
             if item_name and (item_name, shirt_size) in product_map:
                 p_info = product_map[(item_name, shirt_size)]
 
-                # --- FILTER: ONLY ADD TO IMPORT IF FINALISED ---
                 if is_finalised:
                     summary_entries.append({
                         'first_name': first, 'last_name': last, 'email': email,
@@ -175,7 +189,6 @@ for idx, row in df_master.iterrows():
                         'original_slot': val
                     })
             else:
-                # Log error regardless of finalised status (optional: can add check here too)
                 error_log.append({
                     'Name': full_name, 'Slot': val, 'Type': 'Standard',
                     'Reason': f"Mapping Failed. Computed: '{item_name}' Size: '{shirt_size}'"
@@ -192,14 +205,10 @@ for idx, row in df_master.iterrows():
     if night_col not in df_master.columns: break
 
     val = row[night_col]
-
-    # 1. Validation
     if pd.isna(val) or str(val).upper() == 'N/A': continue
 
-    # Check Finalised Status
     is_finalised = str(row.get('Finalised', '')).strip().lower() == 'yes'
 
-    # 2. Determine Day/Session
     day = None
     if "19 January" in str(val):
         day = "D1"
@@ -207,18 +216,16 @@ for idx, row in df_master.iterrows():
         day = "D2"
     elif "21 January" in str(val):
         day = "D3"
-
     session = "Night"
 
     if day:
-        # Sort into Tab
+        # 1. Add to Schedule Tab
         tab_name = f"{day} {session}"
         if tab_name in tabs_data:
             tabs_data[tab_name].append(row)
 
-        # --- MAPPING LOGIC (Night Specific) ---
+        # 2. Determine Product Name
         night_item_name = None
-
         if "Night 1" in str(val):
             night_item_name = "Night - Day 1"
         elif "Night 2" in str(val):
@@ -226,28 +233,27 @@ for idx, row in df_master.iterrows():
         elif "Night 3" in str(val):
             night_item_name = "Night - Day 3"
 
-        # --- SIZE FIX APPLIED HERE ---
         shirt_size = normalize_size(row['Shirt Size'])
 
         match_found = False
+        p_info = None
 
-        # Try exact match
+        # Try matches
         if night_item_name and (night_item_name, shirt_size) in product_map:
             p_info = product_map[(night_item_name, shirt_size)]
             match_found = True
-        # Try alternative match
         elif night_item_name:
             alt_name = f"Night Climb - {night_item_name}"
             if (alt_name, shirt_size) in product_map:
                 p_info = product_map[(alt_name, shirt_size)]
                 match_found = True
 
-        if match_found:
+        # 3. Add to Summary (Finalised Only)
+        if match_found and p_info:
             full_name = row['Name']
             first, last = split_name(full_name)
             email = row['Email']
 
-            # --- FILTER: ONLY ADD TO IMPORT IF FINALISED ---
             if is_finalised:
                 summary_entries.append({
                     'first_name': first, 'last_name': last, 'email': email,
@@ -261,7 +267,6 @@ for idx, row in df_master.iterrows():
                 'Name': row['Name'], 'Slot': val, 'Type': 'Night',
                 'Reason': f"Night Map Failed. Computed: '{night_item_name}' Size: '{shirt_size}'"
             })
-
     else:
         error_log.append({
             'Name': row['Name'], 'Slot': val, 'Type': 'Night',
