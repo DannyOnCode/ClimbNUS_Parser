@@ -77,7 +77,7 @@ def normalize_size(size_str):
     # MAPPING FIX
     if s == "2XL": return "XXL"
     if s == "2XS": return "XXS"
-    if s == "3XL": return "XXXL"  # Added just in case
+    if s == "3XL": return "XXXL"
 
     return s
 
@@ -129,6 +129,9 @@ for idx, row in df_master.iterrows():
     # --- SIZE FIX APPLIED HERE ---
     shirt_size = normalize_size(row['Shirt Size'])
 
+    # Check Finalised Status (Case insensitive)
+    is_finalised = str(row.get('Finalised', '')).strip().lower() == 'yes'
+
     for col in standard_cols:
         if col not in df_master.columns: continue
 
@@ -139,7 +142,7 @@ for idx, row in df_master.iterrows():
         session = get_session(val)
 
         if day and session:
-            # Add to Tab
+            # Add to Tab (Keep all attempts in schedule tabs)
             tab_name = f"{day} {session}"
             if tab_name in tabs_data:
                 tabs_data[tab_name].append(row)
@@ -161,14 +164,18 @@ for idx, row in df_master.iterrows():
             # Lookup
             if item_name and (item_name, shirt_size) in product_map:
                 p_info = product_map[(item_name, shirt_size)]
-                summary_entries.append({
-                    'first_name': first, 'last_name': last, 'email': email,
-                    'product_name': p_info['item_name'],
-                    'product_id': p_info['product_id'],
-                    'price_id': p_info['price_id'],
-                    'original_slot': val
-                })
+
+                # --- FILTER: ONLY ADD TO IMPORT IF FINALISED ---
+                if is_finalised:
+                    summary_entries.append({
+                        'first_name': first, 'last_name': last, 'email': email,
+                        'product_name': p_info['item_name'],
+                        'product_id': p_info['product_id'],
+                        'price_id': p_info['price_id'],
+                        'original_slot': val
+                    })
             else:
+                # Log error regardless of finalised status (optional: can add check here too)
                 error_log.append({
                     'Name': full_name, 'Slot': val, 'Type': 'Standard',
                     'Reason': f"Mapping Failed. Computed: '{item_name}' Size: '{shirt_size}'"
@@ -188,6 +195,9 @@ for idx, row in df_master.iterrows():
 
     # 1. Validation
     if pd.isna(val) or str(val).upper() == 'N/A': continue
+
+    # Check Finalised Status
+    is_finalised = str(row.get('Finalised', '')).strip().lower() == 'yes'
 
     # 2. Determine Day/Session
     day = None
@@ -237,13 +247,15 @@ for idx, row in df_master.iterrows():
             first, last = split_name(full_name)
             email = row['Email']
 
-            summary_entries.append({
-                'first_name': first, 'last_name': last, 'email': email,
-                'product_name': p_info['item_name'],
-                'product_id': p_info['product_id'],
-                'price_id': p_info['price_id'],
-                'original_slot': val
-            })
+            # --- FILTER: ONLY ADD TO IMPORT IF FINALISED ---
+            if is_finalised:
+                summary_entries.append({
+                    'first_name': first, 'last_name': last, 'email': email,
+                    'product_name': p_info['item_name'],
+                    'product_id': p_info['product_id'],
+                    'price_id': p_info['price_id'],
+                    'original_slot': val
+                })
         else:
             error_log.append({
                 'Name': row['Name'], 'Slot': val, 'Type': 'Night',
@@ -275,5 +287,5 @@ with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
         tab_df.to_excel(writer, sheet_name=tab_name, index=False)
 
 print(f"Successfully generated {output_file}")
-print(f"Total mapped: {len(summary_entries)}")
-print(f"Total unmapped: {len(error_log)}")
+print(f"Total mapped (Finalised Only): {len(summary_entries)}")
+print(f"Total unmapped/errors: {len(error_log)}")
